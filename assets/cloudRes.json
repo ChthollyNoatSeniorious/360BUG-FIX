@@ -1,5 +1,5 @@
 {
-  "lastModified": 1789315501,
+  "lastModified": 1790485680,
   "version": "v6.3.0-stable",
   "hotfix": [
     {
@@ -1974,8 +1974,8 @@
       "log_key": "lM8jwFDFbrbKABNJr3IAKZHyavfDQfHu",
       "game_id": "ma75",
       "honor_sdk": {
-        "app_id": "1061350",
-        "cp_id": "1061351",
+        "app_id": "104450825",
+        "cp_id": "109999802650",
         "package_name": "com.netease.sky.honor",
         "sdk_ver": "2.0.17.301"
       },
@@ -2163,6 +2163,34 @@
       },
       "channel": "360_assistant",
       "name": "360账号"
+    },
+    {
+      "package_name": "com.netease.sky.aligames",
+      "app_channel": "uc_platform",
+      "log_key": "lM8jwFDFbrbKABNJr3IAKZHyavfDQfHu",
+      "game_id": "ma75",
+      "uc_platform": {
+        "app_id": "918836",
+        "uc_game_id": 918836,
+        "package_name": "com.netease.sky.aligames",
+        "version_code": 412659,
+        "version_name": "0.16.5",
+        "sdk_ver": "9.7.12.0"
+      },
+      "channel": "uc_platform",
+      "name": "九游账号"
+    },
+    {
+      "package_name": "com.tencent.tmgp.eyou.eygy",
+      "app_channel": "myapp",
+      "log_key": "lM8jwFDFbrbKABNJr3IAKZHyavfDQfHu",
+      "game_id": "ma75",
+      "myapp": {
+        "wx_appid": "wx365db603f56bf4da",
+        "channel": "1109425751"
+      },
+      "channel": "myapp",
+      "name": "应用宝（微信）"
     }
   ],
   "netease_qrcode_login_game_list": [
