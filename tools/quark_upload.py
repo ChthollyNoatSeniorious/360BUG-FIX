@@ -473,10 +473,8 @@ def main(upload_file_path):
         #else:
         #    raise Exception("未获取到最终分享链接")
             
-    except Exception as e:
-        log_step("上传失败", str(e))
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        log_step("上传失败，请检查凭证、网络及目标目录")
         sys.exit(1)
 
 if __name__ == "__main__":

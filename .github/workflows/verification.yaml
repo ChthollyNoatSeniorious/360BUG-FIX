@@ -90,3 +90,9 @@ jobs:
             }
           }
         shell: pwsh
+
+
+  mirror:
+    needs: update-verification
+    uses: ./.github/workflows/mirror.yaml
+    secrets: inherit

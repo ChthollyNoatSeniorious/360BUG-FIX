@@ -1,4 +1,4 @@
-name: Build Stable and Release
+name: Build and Release
 
 permissions:
   contents: write
@@ -7,6 +7,7 @@ on:
   push:
     tags:
       - "v*-stable"
+      - "v*-beta"
   workflow_dispatch:
 
 concurrency:
@@ -14,7 +15,36 @@ concurrency:
   cancel-in-progress: false
   
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release tag and notes
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          [[ "$REF_TYPE" == tag && "$TAG" =~ ^v[0-9]+(\.[0-9]+)+-(stable|beta)$ ]] || {
+            echo 'Select a version tag, not a branch, to release.' >&2
+            exit 1
+          }
+          test -s "ext/${TAG}-CHANGELOG"
+          if [[ "$TAG" == *-beta ]]; then
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  check-quark:
+    needs: prepare
+    uses: ./.github/workflows/check-quark.yaml
+    secrets: inherit
+
   build-windows:
+    needs: [prepare, check-quark]
     runs-on: windows-latest
     env:
       PYTHON_VERSION: "3.12.10"
@@ -125,6 +155,7 @@ jobs:
 
 
   build-macos:
+    needs: [prepare, check-quark]
     runs-on: macos-latest
     env:
       PYTHON_VERSION: "3.12"
@@ -164,7 +195,7 @@ jobs:
             dist/idv-login-${{github.ref_name}}-mac
 
   release:
-    needs: [build-windows, build-macos]
+    needs: [prepare, build-windows, build-macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -184,6 +215,16 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           body_path: ext/${{github.ref_name}}-CHANGELOG
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.prepare.outputs.prerelease == 'true' && 'false' || 'true' }}
           files: |
             **/*.exe
             **/*-mac
+
+
+  sync-release:
+    needs: release
+    uses: ./.github/workflows/sync_release.yaml
+    with:
+      release_tag: ${{ github.ref_name }}
+    secrets: inherit

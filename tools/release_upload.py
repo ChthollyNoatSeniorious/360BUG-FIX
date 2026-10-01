@@ -53,10 +53,20 @@ def uploadAllFilesAndGetMarkDown(fileList):
     for i in data:
         res+=(f"[点我下载{i}](https://j.keygen.eu.org/#{data[i]})\n")
     return res
-def getLatestRelease():
-    headers={"Authorization":"token "+github_token}
-    r=requests.get("https://api.github.com/repos/KKeygen/idv-login/releases/latest",headers=headers)
-    return r.json()
+def getSelectedRelease():
+    tag = os.environ.get("RELEASE_TAG", "").strip()
+    if not tag:
+        raise ValueError("RELEASE_TAG is required; latest stable is not a beta fallback")
+    from urllib.parse import quote
+    repo = os.environ["GITHUB_REPOSITORY"]
+    headers = {"Authorization": "token " + github_token}
+    r = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/{quote(tag, safe='')}",
+                     headers=headers, timeout=30)
+    r.raise_for_status()
+    release = r.json()
+    if release.get("tag_name") != tag or release.get("draft"):
+        raise ValueError("The selected release is missing or is still a draft")
+    return release
 
 def downloadToPath(url, path):
     r=requests.get(url)
@@ -80,24 +90,34 @@ def upload_asset(file_path, release_id):
     return r.json()
 
 
-def releaseToGitee(releaseData,fileList=[]):
-    url=f"https://gitee.com/api/v5/repos/{os.getenv("GITEE_ROPE")}/releases"
-    data={
-        "access_token": os.getenv("GITEE_TOKEN"),
+def releaseToGitee(releaseData, fileList=None):
+    url = f"https://gitee.com/api/v5/repos/{os.environ['GITEE_ROPE']}/releases"
+    data = {
+        "access_token": os.environ["GITEE_TOKEN"],
         "tag_name": releaseData["tag_name"],
-        "name": releaseData["name"],
+        "name": releaseData["name"] or releaseData["tag_name"],
         "body": releaseData["body"],
-        "target_commitish": releaseData["target_commitish"]
+        "target_commitish": releaseData["target_commitish"],
     }
-    giteeData=requests.post(url, data=data).json()
-    giteeReleaseId=str(giteeData["id"])
-    for i in fileList:
-        upload_asset(i, giteeReleaseId)
+    # Public tag lookup does not put credentials in a URL or error message.
+    from urllib.parse import quote
+    existing = requests.get(url + "/tags/" + quote(releaseData["tag_name"], safe=''), timeout=30)
+    if existing.status_code == 200:
+        response = requests.patch(url + "/" + str(existing.json()["id"]), data=data, timeout=30)
+    elif existing.status_code == 404:
+        response = requests.post(url, data=data, timeout=30)
+    else:
+        existing.raise_for_status()
+    response.raise_for_status()
+    release_id = response.json()["id"]
+    for path in fileList or []:
+        upload_asset(path, str(release_id))
+    print("Gitee release synchronized: " + releaseData["tag_name"])
 
 if __name__=='__main__':
     requests.packages.urllib3.disable_warnings()
-    os.mkdir(sys.argv[1])
-    releaseData=getLatestRelease()
+    os.makedirs(sys.argv[1], exist_ok=True)
+    releaseData=getSelectedRelease()
     #for i in releaseData["assets"]:
     #    downloadToPath(i["browser_download_url"],os.path.join(sys.argv[1],i["name"]))
     targetDir=sys.argv[1]
@@ -119,9 +139,8 @@ if __name__=='__main__':
 
 ### 温馨提示2：下面的不是下载链接，下载链接在上面
 ''')
-        print(json.dumps(releaseData))
         releaseToGitee(releaseData,fileList)
-    except:
-        traceback.print_exc()
-        traceback.print_stack()
+    except Exception:
+        print("Gitee release synchronization failed", file=sys.stderr)
+        sys.exit(1)
 

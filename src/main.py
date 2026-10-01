@@ -395,6 +395,7 @@ def initialize():
     genv.set("GLOB_LOGIN_CACHE_PATH", os.path.join(genv.get("FP_WORKDIR"), "cache"))
     genv.set("SCRIPT_DIR", os.path.dirname(os.path.abspath(__file__)))
     CloudPaths = [
+        "https://git.keygen.eu.org/keygen/idv-login/raw/branch/main/assets/cloudRes.json",
         "https://gitee.com/opguess/idv-login/raw/main/assets/cloudRes.json",
         "https://hk.gh-proxy.org/https://raw.githubusercontent.com/KKeygen/idv-login/refs/heads/main/assets/cloudRes.json",
         "https://cdn.jsdelivr.net/gh/KKeygen/idv-login@main/assets/cloudRes.json",

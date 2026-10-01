@@ -292,6 +292,7 @@ def _build_remote_source_info(module_name: str, commit: str) -> Tuple[str, List[
     remote_rel = "src/" + "/".join(module_name.split(".")) + ".py"
     url = f"https://gitee.com/opguess/idv-login/raw/{commit}/{remote_rel}"
     fallbacks = [
+        f"https://git.keygen.eu.org/keygen/idv-login/raw/commit/{commit}/{remote_rel}",
         f"https://raw.githubusercontent.com/KKeygen/idv-login/{commit}/{remote_rel}",
     ]
     return url, fallbacks

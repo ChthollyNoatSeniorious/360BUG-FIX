@@ -32,3 +32,8 @@ jobs:
               run: |
                 pip install requests remotezip
                 python tools/unpack.py
+
+    mirror:
+        needs: analyze-apk
+        uses: ./.github/workflows/mirror.yaml
+        secrets: inherit

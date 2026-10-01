@@ -5,123 +5,55 @@ permissions:
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'assets/anno'
       - 'assets/index.html'
-  workflow_run:
-    workflows:
-      - Sync Release
-    types:
-      - completed
   workflow_dispatch:
     inputs:
-      critical_update:
-        description: '是否为重要更新（true/false）'
+      release_tag:
+        description: '精确版本标签；留空则保留当前云配置版本'
         required: false
-        default: 'false'
+        type: string
+      critical_update:
+        description: '是否为重要更新'
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      critical_update:
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: update-cloud-resources-main
+  cancel-in-progress: false
 
 jobs:
   update_json:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: 3.12
-
+          python-version: '3.12'
       - name: Install dependencies
-        run: pip install -q requests==2.33.1 requests_toolbelt==1.0.0 markdown==3.3.7
-
-      - name: Update cloudRes.json
+        run: pip install -q requests==2.33.1 markdown==3.3.7
+      - name: Update cloudRes.json for exact release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITEE_ROPE: ${{ secrets.GITEE_ROPE }}
-          GITHUB_REPO: ${{ github.repository }}
-          CRITICAL_UPDATE: ${{ github.event.inputs.critical_update || 'false' }}
-        run: |
-          python -c "
-          import sys
-          import requests
-          import os
-          import json
-          import base64
-          import time
-          import markdown
-          
-          # 读取环境变量
-          github_token = os.getenv('GITHUB_TOKEN')
-          repo = os.getenv('GITHUB_REPO')
-          
-          def getLatestRelease():
-              headers = {'Authorization': 'token ' + github_token}
-              r = requests.get(f'https://api.github.com/repos/{repo}/releases/latest', headers=headers)
-              return r.json()
-          
-          def updateCloudRes():
-              # 获取当前 cloudRes.json
-              url = f'https://api.github.com/repos/{repo}/contents/assets/cloudRes.json'
-              headers = {'Authorization': 'token ' + github_token}
-              r = requests.get(url, headers=headers)
-              fileInfo = r.json()
-              sha = fileInfo['sha']
-              
-              # 解码现有内容
-              content = base64.b64decode(fileInfo['content']).decode()
-              data = json.loads(content)
-              
-              # 更新 cloudRes
-              releaseData = getLatestRelease()
-              data['version'] = releaseData['tag_name']
-              data['lastModified'] = int(time.time())
-              
-              # 获取 assets/index.html
-              with open('assets/index.html', 'r', encoding='utf-8') as f:
-                  html = f.read()
-              data['login_base64_page'] = base64.b64encode(html.encode()).decode()
-              
-              data['downloadUrl'] = f\"https://gitee.com/{os.getenv('GITEE_ROPE')}/releases/tag/{releaseData['tag_name']}\"
-              data['detail'] = releaseData['body']
-              data['detail_html'] = markdown.markdown(releaseData.get('body','') or '', extensions=['tables'])
-              critical_update = os.getenv('CRITICAL_UPDATE', 'false').strip().lower() == 'true'
-              data['critical_update'] = critical_update or data['critical_update']
-              
-              # 读取 assets/anno 文件，得到公告
-              with open('assets/anno', 'r', encoding='utf-8') as f:
-                  anno = f.read()
-              data['announcement'] = anno
-              
-              # 提交更新
-              commitMessage = f\"Update cloudRes.json - JSON resources updated\"
-              dataStr = json.dumps(data,indent=2, ensure_ascii=False)
-              dataStr = base64.b64encode(dataStr.encode()).decode()
-              
-              updateData = {
-                  'message': commitMessage,
-                  'content': dataStr,
-                  'sha': sha
-              }
-              
-              for i in range(3):
-                  r = requests.put(url, headers=headers, json=updateData)
-                  if r.status_code == 200 or r.status_code == 201:
-                      print('cloudRes.json updated successfully')
-                      print(r.json())
-                      break
-                  else:
-                      print('Failed to update, retrying...', r.json())
-                      time.sleep(5)
-                      # Refresh sha just in case
-                      r = requests.get(url, headers=headers)
-                      if r.status_code == 200:
-                          updateData['sha'] = r.json()['sha']
-          
-          # 执行更新
-          updateCloudRes()
-          "
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CRITICAL_UPDATE: ${{ inputs.critical_update || false }}
+        run: python tools/update_cloud_resources.py
+
+  mirror:
+    needs: update_json
+    uses: ./.github/workflows/mirror.yaml
+    secrets: inherit
