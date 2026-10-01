@@ -71,8 +71,8 @@ def load_config_from_env():
                             cookies_dict[name] = value
                 cookies = cookies_dict
             log_step("从环境变量加载Cookies成功")
-        except Exception as e:
-            log_step("加载Cookies失败", str(e))
+        except Exception:
+            log_step("加载Cookies失败，请检查配置格式")
             sys.exit(1)
     else:
         log_step("未找到QUARK_COOKIES_B64环境变量")
@@ -84,13 +84,39 @@ def load_config_from_env():
         log_step("未找到QUARK_PDIR_FID环境变量")
         sys.exit(1)
     
-    log_step("配置加载完成", f"pdir_fid: {pdir_fid}")
+    log_step("配置加载完成")
 
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='夸克网盘文件上传工具')
-    parser.add_argument('file_path', help='要上传的文件路径')
-    return parser.parse_args()
+    parser.add_argument('file_path', nargs='?', help='要上传的文件路径')
+    parser.add_argument('--check', action='store_true', help='只读检查凭证和目标目录，不上传文件')
+    args = parser.parse_args()
+    if bool(args.file_path) == args.check:
+        parser.error('请指定上传文件，或单独使用 --check')
+    return args
+
+
+def check_credentials():
+    """只读取目标目录，不输出凭据或目录内容。"""
+    try:
+        response = requests.get(
+            "https://drive-pc.quark.cn/1/clouddrive/file/sort",
+            headers=headers, cookies=cookies,
+            params={"pr": "ucpro", "fr": "pc", "uc_param_str": "",
+                    "pdir_fid": pdir_fid, "_page": 1, "_size": 1},
+            timeout=20, allow_redirects=False,
+        )
+        if response.status_code != 200:
+            log_step("夸克凭证检查失败", f"HTTP {response.status_code}")
+            return False
+        result = response.json()
+        valid = result.get("code") == 0 and isinstance(result.get("data", {}).get("list"), list)
+        log_step("夸克凭证检查通过" if valid else "夸克凭证或目标目录不可用")
+        return valid
+    except Exception:
+        log_step("夸克凭证检查失败，请检查网络或凭证配置")
+        return False
 
 def get_file_hash(file_path):
     """计算文件的MD5和SHA1哈希值"""
@@ -460,5 +486,6 @@ if __name__ == "__main__":
     # 从环境变量加载配置
     load_config_from_env()
     
-    # 执行上传
+    if args.check:
+        sys.exit(0 if check_credentials() else 1)
     main(args.file_path)

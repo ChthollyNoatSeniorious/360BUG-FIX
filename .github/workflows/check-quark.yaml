@@ -1,0 +1,23 @@
+name: Check Quark Credentials
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependency
+        run: pip install -q requests==2.33.1
+      - name: Check credentials without uploading
+        env:
+          QUARK_COOKIES_B64: ${{ secrets.QUARK_COOKIES_B64 }}
+          QUARK_PDIR_FID: ${{ secrets.QUARK_PDIR_FID }}
+        run: python tools/quark_upload.py --check
