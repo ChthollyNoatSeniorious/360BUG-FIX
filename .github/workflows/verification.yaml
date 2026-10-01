@@ -70,7 +70,7 @@ jobs:
           if (git diff --cached --quiet) {
             echo "No verification changes to commit."
           } else {
-            git commit -m "chore: update ext/verification.json [skip ci]"
+            git commit -m "chore: update ext/verification.json"
             $max_retries = 3
             $retry_count = 0
             $success = $false
