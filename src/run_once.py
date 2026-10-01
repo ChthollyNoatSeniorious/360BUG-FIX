@@ -149,14 +149,20 @@ def migrate_channel_records():
         records = []
 
     renamed = {}
-    for item in records:
-        source = legacy_record_source(item)
+    migrated = []
+    for index, item in enumerate(records, 1):
+        try:
+            source = legacy_record_source(item)
+        except ValueError as error:
+            setup_logger().error(f"跳过第 {index} 条不支持的渠道账号记录：{error}")
+            continue
         item["record_source"] = source
         if source == "manual":
             old_uuid = item["uuid"]
             item["uuid"] = "idv-" + old_uuid.removeprefix("idv-")
             renamed[old_uuid.removeprefix("idv-")] = item["uuid"]
-    write_json_restricted(target, records)
+        migrated.append(item)
+    write_json_restricted(target, migrated)
 
     # auto-* 保存的是 UUID。昵称、远端渠道名以及旧 channels.json 均不修改。
     config_path = os.path.join(genv.get("FP_WORKDIR"), "config.json")

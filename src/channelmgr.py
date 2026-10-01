@@ -47,12 +47,12 @@ def legacy_record_source(data: dict) -> str:
     # v5 的华为适配器保存 refreshToken；当前版本改为 serviceToken。
     if (field and field in data) or (login_channel == "huawei" and "refreshToken" in data):
         if login_channel == "myapp" and not data.get("uuid", "").removeprefix("idv-").startswith(("wx-", "qq-")):
-            raise ValueError("旧应用宝记录无法区分微信和 QQ，请确认账号来源")
+            raise ValueError("旧应用宝记录无法区分微信和 QQ")
         return "manual"
     user = data.get("user_info", {})
     if user.get("id") and user.get("token"):
         return "scan"
-    raise ValueError("旧账号记录无法确定手动或扫码来源，请确认后再迁移")
+    raise ValueError("旧账号记录无法确定手动或扫码来源")
 
 
 class channel:
@@ -169,9 +169,13 @@ class ChannelManager:
             with open(genv.get("FP_CHANNEL_RECORD"), "r",encoding='utf-8') as file:
                 try:
                     data = json.load(file)
-                    for item in data:
+                    for index, item in enumerate(data, 1):
                         if "login_info" in item.keys():
-                            source = legacy_record_source(item)
+                            try:
+                                source = legacy_record_source(item)
+                            except ValueError as error:
+                                self.logger.error(f"跳过第 {index} 条不支持的渠道账号记录：{error}")
+                                continue
                             if source == "scan":
                                 self.channels.append(channel.from_dict(item))
                                 continue
@@ -222,7 +226,8 @@ class ChannelManager:
                                 tmpChannel: qihooChannel = qihooChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
                             else:
-                                raise ValueError("不支持的手动渠道账号类型")
+                                self.logger.error(f"跳过第 {index} 条不支持的渠道账号记录：不支持的手动渠道账号类型")
+                                continue
                             # 部分旧适配器的 from_dict 不接收 uuid，统一恢复记录标识。
                             self.channels[-1].uuid = item["uuid"]
                             imported_name = item.get("import_nickname")
