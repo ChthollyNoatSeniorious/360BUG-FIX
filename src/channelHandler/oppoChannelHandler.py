@@ -403,38 +403,12 @@ class oppoChannel(channelmgr.channel):
         res["SAUTH_JSON"] = base64.b64encode(json.dumps(json_data).encode()).decode()
         return json.dumps(res)
 
-    def get_uniSdk_data(self, game_id: str = "", on_complete=None):
-        """按“其他渠道范式”返回用于 confirm_login 的 unisdk 数据。
-
-        关键：
-        - user_id 使用所选角色的 account_id
-        - sessionid 使用 gamesdk user/login 返回的 ticket
-        """
-
-        genv.set("GLOB_LOGIN_UUID", self.uuid)
-        if not game_id:
-            game_id = self.game_id
-        if not game_id:
-            raise RuntimeError("oppo 缺少 game_id")
-
-        short_game_id = getShortGameId(game_id)
-
+    def get_session(self, user_id: str, game_id: str):
+        short_game_id = getShortGameId(game_id or self.game_id)
+        if not short_game_id:
+            raise ValueError("OPPO 缺少 game_id")
         if not self.is_token_valid():
-            if on_complete is not None:
-                def _on_login_done(success):
-                    if success and self.is_token_valid():
-                        try:
-                            result = self._build_oppo_unisdk_result(short_game_id)
-                            on_complete(result)
-                        except Exception as e:
-                            self.logger.error(f"OPPO UniSDK error: {e}")
-                            on_complete(None)
-                    else:
-                        on_complete(None)
-                self.request_user_login(on_complete=_on_login_done)
-                return None
-            else:
-                self.request_user_login()
+            self.request_user_login()
 
         # 使用前 refresh 一次，尽量拿到最新 secondaryTokenMap（失败直接抛出）
         self.refresh_before_use()
@@ -524,11 +498,15 @@ class oppoChannel(channelmgr.channel):
 
         # 选角：若指定 chosen_account_id 则优先；否则按 login_time 最大；再兜底取第一个
         chosen = None
-        if self.chosen_account_id:
+        target_id = str(user_id or self.chosen_account_id)
+        if target_id:
             for a in accounts:
-                if str(a.get("account_id") or "").strip() == self.chosen_account_id:
+                if str(a.get("account_id") or "").strip() == target_id:
                     chosen = a
                     break
+
+        if user_id and chosen is None:
+            raise ValueError("OPPO 未返回本次登录指定的账号")
 
         if chosen is None and len(accounts) > 1:
             # 多账号且未指定默认：弹 Qt 菜单让用户选 accountName；是否记住由勾选框决定
@@ -625,8 +603,6 @@ class oppoChannel(channelmgr.channel):
             "realm_name": str(chosen.get("realm_name") or "").strip(),
         }
 
-        import channelHandler.channelUtils as channelUtils
-
         age = 0
         if isinstance(user_dto, dict):
             try:
@@ -637,17 +613,60 @@ class oppoChannel(channelmgr.channel):
         extra_data = json.dumps({"adv_channel": "0", "adid": "0"}, ensure_ascii=False)
         realname = json.dumps({"realname_type": 0, "age": age}, ensure_ascii=False)
 
+        return self._session_result(
+            user_id, account_id, ticket, sdk_version=str(profile.sdkversion),
+            extra_data=extra_data, realname=realname,
+        )
+
+    def get_uniSdk_data(self, game_id: str = "", on_complete=None):
+        """按“其他渠道范式”返回用于 confirm_login 的 unisdk 数据。
+
+        关键：
+        - user_id 使用所选角色的 account_id
+        - sessionid 使用 gamesdk user/login 返回的 ticket
+        """
+
+        genv.set("GLOB_LOGIN_UUID", self.uuid)
+        if not game_id:
+            game_id = self.game_id
+        if not game_id:
+            raise RuntimeError("oppo 缺少 game_id")
+
+        short_game_id = getShortGameId(game_id)
+
+        if not self.is_token_valid():
+            if on_complete is not None:
+                def _on_login_done(success):
+                    if success and self.is_token_valid():
+                        try:
+                            result = self._build_oppo_unisdk_result(short_game_id)
+                            on_complete(result)
+                        except Exception as e:
+                            self.logger.error(f"OPPO UniSDK error: {e}")
+                            on_complete(None)
+                    else:
+                        on_complete(None)
+                self.request_user_login(on_complete=_on_login_done)
+                return None
+            else:
+                self.request_user_login()
+
+        session = self.get_session("", short_game_id)
+        account_id = session["sdkuid"]
+        ticket = session["sessionid"]
+        import channelHandler.channelUtils as channelUtils
+
         self.uniBody = channelUtils.buildSAUTH(
             self.channel_name,
             self.channel_name,
             account_id,
             ticket,
             short_game_id,
-            str(profile.sdkversion),
+            session["sdk_version"],
             {
                 "get_access_token": "1",
-                "extra_data": extra_data,
-                "realname": realname,
+                "extra_data": session["extra_data"],
+                "realname": session["realname"],
             },
         )
 
@@ -663,7 +682,7 @@ class oppoChannel(channelmgr.channel):
             "login_channel": self.channel_name,
             "udid": udid2,
             "app_channel": self.channel_name,
-            "sdk_version": str(profile.sdkversion),
+            "sdk_version": session["sdk_version"],
             "jf_game_id": short_game_id,
             "pay_channel": self.channel_name,
             "extra_data": "",

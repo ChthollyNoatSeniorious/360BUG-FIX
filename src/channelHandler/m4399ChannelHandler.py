@@ -373,6 +373,14 @@ class m4399Channel(channelmgr.channel):
 
     # ── UniSDK ────────────────────────────────────────────────
 
+    def get_session(self, user_id: str, game_id: str):
+        if not self._recover_existing_credential():
+            self.request_user_login()
+        data = self._get_login_data()
+        if not data or not data.get("access_token"):
+            raise ValueError("登录已过期，请在渠道服管理界面重新登录")
+        return self._session_result(user_id, data.get("uid"), data.get("state"))
+
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         genv.set("GLOB_LOGIN_UUID", self.uuid)
         if not game_id:

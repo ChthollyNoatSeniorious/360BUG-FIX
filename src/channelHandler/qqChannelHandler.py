@@ -204,6 +204,16 @@ class qqChannel(channelmgr.channel):
 
         return json.dumps(res)
 
+    def get_session(self, user_id: str, game_id: str):
+        if not self.is_token_valid():
+            self.request_user_login()
+        if self.session is None:
+            raise ValueError("登录已过期，请在渠道服管理界面重新登录")
+        return self._session_result(
+            user_id, self.session.openid, self.session.atk,
+            extra_data=self._get_extra_data(),
+        )
+
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         """获取 UniSDK 登录数据，支持异步模式。"""
         genv.set("GLOB_LOGIN_UUID", self.uuid)

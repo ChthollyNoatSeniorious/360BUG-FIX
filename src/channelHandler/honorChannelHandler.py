@@ -120,6 +120,17 @@ class honorChannel(channelmgr.channel):
 
     # ── UniSDK 数据 ──────────────────────────────────────────
 
+    def get_session(self, user_id: str, game_id: str):
+        if not self.is_token_valid():
+            self.request_user_login()
+        if self.honorLogin.is_token_expired() and not self._refresh_session():
+            self.request_user_login()
+        if not self.unionToken:
+            raise ValueError("登录已过期，请在渠道服管理界面重新登录")
+        return self._session_result(
+            user_id, self.unionToken.get("openId"), self.unionToken.get("token"),
+        )
+
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         genv.set("GLOB_LOGIN_UUID", self.uuid)
         if not game_id:

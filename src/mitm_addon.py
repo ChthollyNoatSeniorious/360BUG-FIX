@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -158,16 +159,17 @@ class IDVLoginAddon:
     # mitmproxy hooks
     # ------------------------------------------------------------------
 
-    def request(self, flow: http.HTTPFlow):
+    async def request(self, flow: http.HTTPFlow):
         host = flow.request.pretty_host.lower()
         if host not in self.target_domains:
             return
 
         path = flow.request.path.split("?")[0]
 
-        # This host is observed only for session validity.  Never apply MPay
-        # request rewriting to its traffic.
+        # SAUTH 使用真实身份，只为已关联的手动账号刷新渠道会话。
         if host == getattr(self, "auth_status_domain", ""):
+            if path.endswith("/sdk/uni_sauth") and flow.request.method == "POST":
+                await self._refresh_native_session(flow)
             return
 
         # ── _idv-login routes: handle locally, do NOT forward upstream ──
@@ -307,6 +309,65 @@ class IDVLoginAddon:
                 self._handle_data_upload_response(flow)
         except Exception:
             self.logger.exception(f"处理响应时出错: {path}")
+
+    async def _refresh_native_session(self, flow: http.HTTPFlow):
+        # 现有 postSignedData 与游戏 SAUTH 使用 JSON；其余请求原样透传。
+        try:
+            data = json.loads(flow.request.content)
+        except (ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        game_id = str(data.get("gameid") or "")
+        user_id = str(data.get("sdkuid") or "")
+        login_channel = str(data.get("login_channel") or "")
+        if not game_id or not user_id or not login_channel:
+            return
+        path = flow.request.path.split("?")[0]
+        if path != f"/{getShortGameId(game_id)}/sdk/uni_sauth":
+            return
+
+        try:
+            record = app_state.channels_helper.native_account(login_channel, user_id, game_id)
+            if record is None:
+                return
+            loop = asyncio.get_running_loop()
+            ready = loop.create_future()
+
+            def finish(session=None, error=None):
+                if not ready.done():
+                    if error is not None:
+                        ready.set_exception(error)
+                    else:
+                        ready.set_result(session)
+
+            def refresh():
+                try:
+                    session = record.get_session(user_id, game_id)
+                    app_state.channels_helper.save_records()
+                except Exception as error:
+                    loop.call_soon_threadsafe(finish, None, error)
+                else:
+                    loop.call_soon_threadsafe(finish, session)
+
+            # 复用手动/自动登录的 Qt 主线程入口；不阻塞代理事件循环。
+            app_state.run_on_main_thread(refresh)
+            session = await ready
+            # 保留游戏的身份、设备和 AT/RT；只替换渠道鉴权所需的字段。
+            for key in ("sessionid", "extra_data", "timestamp"):
+                if key in session:
+                    data[key] = session[key]
+            from channelHandler.channelUtils import CustomEncoder, calcSign
+            content = json.dumps(data, cls=CustomEncoder)
+            key = self.cloud_res().get_by_game_id_and_key(getShortGameId(game_id), "log_key")
+            signature = calcSign(flow.request.url, flow.request.method, content, key)
+            flow.request.content = content.encode("utf-8")
+            flow.request.headers["X-Client-Sign"] = signature
+        except Exception:
+            # 已关联账号失败时停止本次请求，不能悄悄发送过期会话。
+            flow.kill()
+            app_state.toast("渠道会话更新失败，请在渠道服管理界面重新登录。", duration=5000)
+            raise
 
     def _check_uni_sauth_response(self, flow: http.HTTPFlow):
         """Notify when the game's short-id uni_sauth check is no longer valid."""
@@ -620,10 +681,7 @@ class IDVLoginAddon:
             data["qrcode_scanners"][0]["url"] = qr_url
 
             if self.genv.get("SCAN_RECORD_ENABLED", True):
-                if self.genv.get("NATIVE_SAVE_ENABLED", False):
-                    data["scanner_guide_text"] = "已开启原生保存：支持九游荣耀等小众渠道，时长约3天，可在管理界面切换"
-                else:
-                    data["scanner_guide_text"] = "已开启扫码记录：记住渠道一个月及以上，可在管理界面切换"
+                data["scanner_guide_text"] = "已开启扫码登录【官服/渠道服】账号，如需长期保存，点击上方图标"
                 data["scanner_download_guide_text"] = "如果您正在为代肝/共号扫码，请注意保护账号安全，谨防诈骗"
 
             flow.response.content = json.dumps(data).encode()
@@ -740,7 +798,8 @@ class IDVLoginAddon:
         effective_game_id: str = "",
         allow_auto_close: bool = True,
     ):
-        is_selected = bool(self.genv.get("CHANNEL_ACCOUNT_SELECTED"))
+        selected_uuid = self.genv.get("CHANNEL_ACCOUNT_SELECTED", "")
+        is_selected = bool(selected_uuid)
         try:
             raw_data = flow.response.content
             form_data = {}
@@ -761,79 +820,67 @@ class IDVLoginAddon:
                 resp_data = json.loads(flow.response.content)
                 modified = False
 
-                # 仅在原生保存开启时修改响应（关闭时保持与 v5.9.1 一致，完全透传）
-                if self.genv.get("NATIVE_SAVE_ENABLED", False):
-                    login_channel = resp_data.get("user", {}).get("login_channel", "")
-                    if not login_channel.startswith("netease"):
-                        ext_info = resp_data.get("ext_info", {})
-                        if not ext_info.get("is_remember"):
-                            ext_info["is_remember"] = True
-                            resp_data["ext_info"] = ext_info
-                            modified = True
+                login_channel = resp_data.get("user", {}).get("login_channel", "")
+                if not login_channel.startswith("netease"):
+                    ext_info = resp_data.get("ext_info", {})
+                    if not ext_info.get("is_remember"):
+                        ext_info["is_remember"] = True
+                        resp_data["ext_info"] = ext_info
+                        modified = True
 
-                        user = resp_data.get("user", {})
+                    user = resp_data.get("user", {})
 
-                        # pc_ext_info.is_remember 强制设为 true
-                        pc_ext = user.get("pc_ext_info", {})
-                        if isinstance(pc_ext, dict) and not pc_ext.get("is_remember"):
-                            pc_ext["is_remember"] = True
-                            user["pc_ext_info"] = pc_ext
-                            modified = True
+                    # pc_ext_info.is_remember 强制设为 true
+                    pc_ext = user.get("pc_ext_info", {})
+                    if isinstance(pc_ext, dict) and not pc_ext.get("is_remember"):
+                        pc_ext["is_remember"] = True
+                        user["pc_ext_info"] = pc_ext
+                        modified = True
 
-                        resp_data["user"] = user
-                        if not user.get("client_username"):
-                            import base64
-                            from datetime import datetime, timezone, timedelta
-                            from urllib.parse import unquote
+                    resp_data["user"] = user
+                    manual_record = None
+                    manager = app_state.channels_helper
+                    if selected_uuid:
+                        selected = manager.query_channel(selected_uuid) if manager else None
+                        if (selected is not None and selected.record_source == "manual"
+                                and selected.channel_name == login_channel):
+                            manual_record = selected
+                    import base64
 
-                            channel = user.get("login_channel", "")
-                            uid = user.get("id", "")
-                            short_channel = channel.replace("nearme_", "") if channel.startswith("nearme_") else channel
-                            display_name = f"{short_channel}_{uid[-3:]}" if uid else short_channel
+                    display_channel = login_channel
+                    if (manual_record is not None and login_channel == "myapp"
+                            and manual_record.uuid.removeprefix("idv-").startswith("qq-")):
+                        display_channel = "myapp_qq"
+                    if manager:
+                        display_channel = manager._manual_channel_name(display_channel, game_id) or login_channel
+                    uid = str(user.get("id") or "")
+                    account_name = str(user.get("client_username") or user.get("nickname") or uid[-3:])
+                    if manual_record is not None:
+                        account_name = getattr(manual_record, "import_nickname", "") or manual_record.name
+                    if account_name.startswith(login_channel):
+                        account_name = display_channel + account_name[len(login_channel):]
+                    if display_channel not in account_name:
+                        account_name = f"{display_channel} {account_name}".strip()
+                    label = "长期保存" if manual_record is not None else "短期保存"
+                    display_name = f"{account_name}（{label}）"
+                    user["client_username"] = display_name
 
-                            # 从 extra_unisdk_data 中提取 AT 过期时间
-                            expiry_str = ""
-                            try:
-                                eud_raw = ext_info.get("extra_unisdk_data", "")
-                                if eud_raw:
-                                    eud = json.loads(eud_raw)
-                                    sauth_b64 = eud.get("SAUTH_JSON", "")
-                                    if sauth_b64:
-                                        sauth = json.loads(base64.b64decode(unquote(sauth_b64)))
-                                        at_jwt = sauth.get("access_token", "")
-                                        if at_jwt and "." in at_jwt:
-                                            payload_b64 = at_jwt.split(".")[1]
-                                            payload_b64 += "=" * (-len(payload_b64) % 4)
-                                            at_payload = json.loads(base64.b64decode(payload_b64))
-                                            exp_ts = at_payload.get("exp", 0)
-                                            if exp_ts:
-                                                cst = timezone(timedelta(hours=8))
-                                                exp_dt = datetime.fromtimestamp(exp_ts, tz=cst)
-                                                expiry_str = f"(临时保存:{exp_dt.month}.{exp_dt.day}过期)"
-                            except Exception:
-                                pass
+                    cd_raw = user.get("client_data", "")
+                    try:
+                        cd = json.loads(base64.b64decode(cd_raw)) if cd_raw else {}
+                    except Exception:
+                        cd = {}
+                    if not isinstance(cd, dict):
+                        cd = {}
+                    cd["display_username"] = display_name
+                    user["client_data"] = base64.b64encode(
+                        json.dumps(cd, ensure_ascii=False).encode()
+                    ).decode()
+                    modified = True
+                    self.logger.info("已更新原生渠道服账号显示名称")
 
-                            display_name += expiry_str
-
-                            user["client_username"] = display_name
-                            resp_data["user"] = user
-
-                            # 同步更新 client_data 中的 display_username
-                            cd_raw = user.get("client_data", "")
-                            try:
-                                cd = json.loads(base64.b64decode(cd_raw)) if cd_raw else {}
-                            except Exception:
-                                cd = {}
-                            cd["display_username"] = display_name
-                            user["client_data"] = base64.b64encode(
-                                json.dumps(cd, ensure_ascii=False).encode()
-                            ).decode()
-
-                            modified = True
-                            self.logger.info(f"已确定渠道服显示名称: {display_name}")
-
-                    if modified and not is_selected:
-                        flow.response.content = json.dumps(resp_data).encode()
+                if modified:
+                    flow.response.content = json.dumps(resp_data).encode()
 
             if is_selected:
                 if (
@@ -848,7 +895,7 @@ class IDVLoginAddon:
                     if pending_login_info:
                         resp_data = json.loads(raw_data)
                         app_state.channels_helper.import_from_scan(
-                            pending_login_info, resp_data
+                            pending_login_info, resp_data, game_id
                         )
         except Exception:
             self.logger.exception("处理 exchange_token 响应失败")

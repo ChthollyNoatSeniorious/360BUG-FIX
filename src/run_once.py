@@ -124,6 +124,51 @@ def _probe_proxy_mode(logger):
     genv.set("proxy_mode_asked_0403", True, True)
 
 
+def migrate_channel_records():
+    """Run Once：保留旧账号文件，迁移到显式区分来源的新文件。"""
+    if genv.get("channel_records_v2_migrated", False):
+        return
+    import json
+    from channelmgr import legacy_record_source
+    from secure_write import write_json_restricted
+
+    target = genv.get("FP_CHANNEL_RECORD")
+    legacy = os.path.join(genv.get("FP_WORKDIR"), "channels.json")
+    if os.path.exists(target):
+        with open(target, "r", encoding="utf-8") as file:
+            records = json.load(file)
+    elif os.path.exists(legacy):
+        try:
+            with open(legacy, "r", encoding="utf-8") as file:
+                records = json.load(file)
+        except (ValueError, UnicodeDecodeError):
+            # 沿用旧版读取损坏记录后清空的行为，但回退用的旧文件不改动。
+            setup_logger().exception("读取渠道服登录信息失败。已经清空渠道服信息。")
+            records = []
+    else:
+        records = []
+
+    renamed = {}
+    for item in records:
+        source = legacy_record_source(item)
+        item["record_source"] = source
+        if source == "manual":
+            old_uuid = item["uuid"]
+            item["uuid"] = "idv-" + old_uuid.removeprefix("idv-")
+            renamed[old_uuid.removeprefix("idv-")] = item["uuid"]
+    write_json_restricted(target, records)
+
+    # auto-* 保存的是 UUID。昵称、远端渠道名以及旧 channels.json 均不修改。
+    config_path = os.path.join(genv.get("FP_WORKDIR"), "config.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as file:
+            config = json.load(file)
+        for key, value in config.items():
+            if key.startswith("auto-") and isinstance(value, str) and value in renamed:
+                genv.set(key, renamed[value], True)
+    genv.set("channel_records_v2_migrated", True, True)
+
+
 def run_once():
     """一次性任务，通过 genv 键控制只执行一次"""
     logger = setup_logger()

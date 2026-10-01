@@ -222,6 +222,14 @@ class qihooChannel(channelmgr.channel):
         self.qt_cookie = new
 
     # ── UniSDK 数据 ──────────────────────────────────────────
+    def get_session(self, user_id: str, game_id: str):
+        if not self._has_valid_token():
+            self.request_user_login()
+        credentials = self._credentials()
+        return self._session_result(
+            user_id, credentials["qid"], credentials["access_token"],
+        )
+
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         genv.set("GLOB_LOGIN_UUID", self.uuid)
         if not game_id:

@@ -52,6 +52,7 @@ class miChannel(channelmgr.channel):
             name,
         )
         self.oAuthData = oAuthData
+        self._update_oauth_name()
         self.logger = setup_logger()
         self.crossGames = False
         # Done: Use Actions to auto update game_id-app_id mapping by uploading an APK.
@@ -72,12 +73,26 @@ class miChannel(channelmgr.channel):
         self.uniData = None
         self.account_type = account_type
 
+    def _update_oauth_name(self, previous_oauth=None):
+        """使用小米返回的昵称，保留用户手动设置的账号名称。"""
+        data = self.oAuthData if isinstance(self.oAuthData, dict) else {}
+        nickname = data.get("nickname")
+        previous_name = (
+            previous_oauth.get("nickname")
+            if isinstance(previous_oauth, dict) else None
+        )
+        if isinstance(nickname, str) and nickname.strip():
+            if self.name == self.uuid or (previous_name and self.name == previous_name):
+                self.name = nickname
+
     def request_user_login(self, on_complete=None):
         genv.set("GLOB_LOGIN_UUID", self.uuid)
 
         if on_complete is not None:
             def _on_done(_data):
+                previous_oauth = self.oAuthData
                 self.oAuthData = self.miLogin.oauthData
+                self._update_oauth_name(previous_oauth)
                 self.account_type = self.miLogin.account_type
                 self.logger.info(f"小米登录类型：{self.account_type}")
                 on_complete(self.oAuthData is not None)
@@ -85,7 +100,9 @@ class miChannel(channelmgr.channel):
             return
 
         self.miLogin.webLogin()
+        previous_oauth = self.oAuthData
         self.oAuthData = self.miLogin.oauthData
+        self._update_oauth_name(previous_oauth)
         self.account_type = self.miLogin.account_type
         self.logger.info(f"小米登录类型：{self.account_type}")
         return self.oAuthData != None
@@ -183,6 +200,10 @@ class miChannel(channelmgr.channel):
         res["extra_data"] = extra
         res["realname"] = realname
         return json.dumps(res)
+
+    def get_session(self, user_id: str, game_id: str):
+        account_id, session = self._get_session()
+        return self._session_result(user_id, account_id, session)
 
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         """获取 UniSDK 登录数据，支持异步模式。

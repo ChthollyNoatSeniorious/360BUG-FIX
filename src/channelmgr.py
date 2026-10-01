@@ -28,6 +28,33 @@ from channelHandler.channelUtils import cmp_game_id
 from ssl_utils import should_verify_ssl
 
 
+def legacy_record_source(data: dict) -> str:
+    """按旧版实际落盘字段区分手动账号与扫码记录，不按渠道名猜测。"""
+    source = data.get("record_source")
+    if source in ("manual", "scan"):
+        return source
+    if source is not None:
+        raise ValueError("账号记录的来源标记无法识别")
+    login_channel = data["login_info"]["login_channel"]
+    credential_fields = {
+        "xiaomi_app": "oAuthData", "huawei": "serviceToken",
+        "nearme_vivo": "chosenAccount", "myapp": "session_json",
+        "oppo": "loginResp", "bilibili_sdk": "loginResp",
+        "honor_sdk": "unionToken", "uc_platform": "ucSession",
+        "4399com": "loginResp", "360_assistant": "qt_cookie",
+    }
+    field = credential_fields.get(login_channel)
+    # v5 的华为适配器保存 refreshToken；当前版本改为 serviceToken。
+    if (field and field in data) or (login_channel == "huawei" and "refreshToken" in data):
+        if login_channel == "myapp" and not data.get("uuid", "").removeprefix("idv-").startswith(("wx-", "qq-")):
+            raise ValueError("旧应用宝记录无法区分微信和 QQ，请确认账号来源")
+        return "manual"
+    user = data.get("user_info", {})
+    if user.get("id") and user.get("token"):
+        return "scan"
+    raise ValueError("旧账号记录无法确定手动或扫码来源，请确认后再迁移")
+
+
 class channel:
     def __init__(
         self,
@@ -41,6 +68,7 @@ class channel:
         uuid: str = "",
     ) -> None:
         self.login_info = login_info
+        self.record_source = "scan" if type(self) is channel else "manual"
         self.user_info = user_info
         self.ext_info = ext_info
         self.device_info = device_info
@@ -92,12 +120,35 @@ class channel:
             "cv": "a1.5.0",
         }
 
+    @staticmethod
+    def _session_result(user_id: str, sdkuid, sessionid, **fields):
+        """校验目标账号后返回 SAUTH 所需字段，不生成另一套登录请求。"""
+        sdkuid = str(sdkuid or "")
+        if not sdkuid or not sessionid:
+            raise ValueError("渠道登录信息不完整：缺少账号或 session，请重新登录")
+        if user_id and str(user_id) != sdkuid:
+            raise ValueError("渠道返回的账号与本次登录账号不一致，请重新选择账号")
+        return {"sdkuid": sdkuid, "sessionid": sessionid, **fields}
+
+    def get_session(self, user_id: str, game_id: str):
+        """扫码记录沿用捕获的 SAUTH，不把它升级为可刷新的手动账号。"""
+        import base64
+        from urllib.parse import unquote
+
+        extra = json.loads(self.ext_info["extra_unisdk_data"])
+        data = json.loads(base64.b64decode(unquote(extra["SAUTH_JSON"])))
+        if not cmp_game_id(data["gameid"], game_id):
+            raise ValueError("扫码记录与本次登录游戏不一致")
+        self._session_result(user_id, data["sdkuid"], data["sessionid"])
+        return data
+
     def get_non_sensitive_data(self):
         return {
             "create_time": self.create_time,
             "last_login_time": self.last_login_time,
             "uuid": self.uuid,
             "name": self.name,
+            "record_source": self.record_source,
         }
 
     def before_save(self):
@@ -120,6 +171,10 @@ class ChannelManager:
                     data = json.load(file)
                     for item in data:
                         if "login_info" in item.keys():
+                            source = legacy_record_source(item)
+                            if source == "scan":
+                                self.channels.append(channel.from_dict(item))
+                                continue
                             channel_name = item["login_info"]["login_channel"]
                             if channel_name == "xiaomi_app":
 
@@ -137,37 +192,44 @@ class ChannelManager:
                             elif channel_name =="nearme_vivo":
                                 tmpChannel: vivoChannel = vivoChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "myapp" and item["uuid"].startswith("wx-"):
+                            elif channel_name == "myapp" and item["uuid"].removeprefix("idv-").startswith("wx-"):
                                 tmpChannel:wechatChannel=wechatChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "myapp" and item["uuid"].startswith("qq-"):
+                            elif channel_name == "myapp" and item["uuid"].removeprefix("idv-").startswith("qq-"):
                                 from channelHandler.qqChannelHandler import qqChannel
                                 tmpChannel: qqChannel = qqChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "oppo" and item["uuid"].startswith("phone-"):
+                            elif channel_name == "oppo" and item["uuid"].removeprefix("idv-").startswith("phone-"):
                                 tmpChannel: oppoChannel = oppoChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "bilibili_sdk" and item["uuid"].startswith("bili-"):
+                            elif channel_name == "bilibili_sdk" and item["uuid"].removeprefix("idv-").startswith("bili-"):
                                 tmpChannel: bilibiliChannel = bilibiliChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "honor_sdk" and item["uuid"].startswith("honor-"):
+                            elif channel_name == "honor_sdk" and item["uuid"].removeprefix("idv-").startswith("honor-"):
                                 from channelHandler.honorChannelHandler import honorChannel
                                 tmpChannel: honorChannel = honorChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "uc_platform" and item["uuid"].startswith("uc-"):
+                            elif channel_name == "uc_platform" and item["uuid"].removeprefix("idv-").startswith("uc-"):
                                 from channelHandler.ucChannelHandler import ucChannel
                                 tmpChannel: ucChannel = ucChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "4399com" and item["uuid"].startswith("4399-"):
+                            elif channel_name == "4399com" and item["uuid"].removeprefix("idv-").startswith("4399-"):
                                 from channelHandler.m4399ChannelHandler import m4399Channel
                                 tmpChannel: m4399Channel = m4399Channel.from_dict(item)
                                 self.channels.append(tmpChannel)
-                            elif channel_name == "360_assistant" and item["uuid"].startswith("360-"):
+                            elif channel_name == "360_assistant" and item["uuid"].removeprefix("idv-").startswith("360-"):
                                 from channelHandler.qihooChannelHandler import qihooChannel
                                 tmpChannel: qihooChannel = qihooChannel.from_dict(item)
                                 self.channels.append(tmpChannel)
                             else:
-                                self.channels.append(channel.from_dict(item))
+                                raise ValueError("不支持的手动渠道账号类型")
+                            # 部分旧适配器的 from_dict 不接收 uuid，统一恢复记录标识。
+                            self.channels[-1].uuid = item["uuid"]
+                            imported_name = item.get("import_nickname")
+                            self.channels[-1].import_nickname = (
+                                imported_name if isinstance(imported_name, str) and imported_name
+                                else self.channels[-1].name
+                            )
                 except:
                     self.logger.exception(f"读取渠道服登录信息失败。已经清空渠道服信息。")
                     from secure_write import write_json_restricted
@@ -211,7 +273,26 @@ class ChannelManager:
             reverse=True,
         )
 
-    def import_from_scan(self, login_info: dict, exchange_info: dict):
+    def _manual_channel_name(self, login_channel: str, game_id: str) -> str:
+        """当前游戏支持该渠道手动登录时返回显示名，否则返回空串。"""
+        from channelHandler.channelUtils import getShortGameId
+        entries = []
+        if game_id:
+            try:
+                from cloudRes import CloudRes
+                entries = CloudRes().get_all_by_game_id(getShortGameId(game_id)) or []
+            except Exception:
+                entries = []
+        if not entries:
+            entries = manual_login_channels
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            if (item.get("channel") or item.get("app_channel")) == login_channel:
+                return item.get("name") or login_channel
+        return ""
+
+    def import_from_scan(self, login_info: dict, exchange_info: dict, game_id: str = ""):
         tmp_channel: channel = channel(
             login_info,
             exchange_info["user"],
@@ -219,42 +300,29 @@ class ChannelManager:
             exchange_info["device"] if "device" in exchange_info.keys() else {},
         )
         import app_state
-        native_save = genv.get("NATIVE_SAVE_ENABLED", False)
         login_channel = login_info["login_channel"]
 
-        if native_save:
-            toast_text = "扫码结果已临时保存，时长约3天，可在游戏的下拉框中选择账号登录。"
+        manual_name = self._manual_channel_name(login_channel, game_id)
+        if manual_name:
+            self.logger.info(f"正在扫码导入{manual_name}账号，保存时间较短，请前往渠道服管理界面手动登录以长期保存。")
+            toast_text = f"您正在扫码导入{manual_name}账号，保存时间较短，请及时参看教程，前往【渠道服管理界面】操作"
         else:
-            toast_text = "扫码结果已保存在渠道服管理界面，有效期一个月及以上。"
+            toast_text = "扫码结果已临时保存，时长约3天，可在游戏的下拉框中选择账号登录。"
 
         if login_channel in [i["channel"] for i in manual_login_channels] and login_channel not in ("myapp", "oppo", "bilibili_sdk", "myapp_qq"):
-            if native_save:
-                self.logger.info("扫码结果已临时保存在游戏账号列表中，有效期约3天。如需长期保存请进入渠道服管理界面手动登录。")
-                toast_text = "扫码结果已临时保存，时长约3天。如需长期保存请进入渠道服管理界面手动登录。"
-            else:
-                self.logger.warning("该渠道不支持扫码自动保存，请进入渠道服管理界面使用手动登录功能。")
-                toast_text = "该渠道需要通过渠道服管理界面手动登录来长期保存。"
+            # 这些渠道不写入工具记录，仅依赖游戏原生保存。
             app_state.toast(toast_text, duration=5000)
             return False
-        if login_channel == "myapp" or login_channel == "myapp_qq":
-            self.logger.info("正在导入应用宝账号，保存时间为三天左右，长期保存请前往渠道服管理界面。")
-            toast_text += "\n正在导入应用宝账号，保存时间为三天左右，长期保存请前往渠道服管理界面。"
-        if login_channel == "bilibili_sdk":
-            self.logger.info("正在导入Bilibili账号。也可以在渠道服管理界面使用Bilibili扫码登录。")
-            toast_text += "\n正在导入Bilibili账号。也可以在渠道服管理界面使用Bilibili扫码登录。"
-        if login_channel == "oppo":
-            self.logger.warning("您正在扫码导入OPPO账号，扫码登录有效期在一周到三个月不等，如需长期免扫码登录，请使用手动登录。具体方法请参见教程。")
-            if native_save:
-                toast_text = "已临时保存OPPO账号，有效期约3天。扫码登录有效期在一周到三个月不等，如需长期免扫码登录，请使用手动登录。"
-            else:
-                toast_text = "已保存OPPO账号在渠道服管理界面，扫码登录有效期在一周到三个月不等，如需长期免扫码登录，请使用手动登录。"
+
         app_state.toast(toast_text, duration=5000)
         #寻找是否有重复的self.user_info["id"]
         to_be_deleted = []
         try:
             account_name=tmp_channel.user_info["id"]
             for i_channel in self.channels:
-                if "id" in i_channel.user_info and i_channel.user_info["id"] == account_name:
+                if (i_channel.record_source == "scan"
+                        and i_channel.channel_name == tmp_channel.channel_name
+                        and i_channel.user_info.get("id") == account_name):
                     to_be_deleted.append(i_channel)
             #按self.last_login_time排序，取最近一次登录过的账号的名字和uuid给新账号
             if len(to_be_deleted) > 0:
@@ -334,6 +402,11 @@ class ChannelManager:
                 on_complete(False)
             return
 
+        old_uuid = tmp_channel.uuid
+        tmp_channel.uuid = "idv-" + old_uuid.removeprefix("idv-")
+        if tmp_channel.name == old_uuid:
+            tmp_channel.name = tmp_channel.uuid
+
         if on_complete is not None:
             # 保持对 tmp_channel 的引用，防止异步登录期间被 GC
             # 否则 tmp_channel 是局部变量，函数返回后会被销毁
@@ -350,6 +423,7 @@ class ChannelManager:
                         on_complete(None)
                     elif success and tmp_channel.is_token_valid():
                         tmp_channel.last_login_time = int(time.time())
+                        tmp_channel.import_nickname = tmp_channel.name
                         self.channels.append(tmp_channel)
                         self.save_records()
                         on_complete(True)
@@ -436,6 +510,7 @@ class ChannelManager:
             tmp_channel.request_user_login()
             if tmp_channel.is_token_valid():
                 tmp_channel.last_login_time = int(time.time())
+                tmp_channel.import_nickname = tmp_channel.name
                 self.channels.append(tmp_channel)
                 self.save_records()
                 return True
@@ -491,12 +566,12 @@ class ChannelManager:
         
         # 判断是否是 weblogin 账号（使用 WebBrowser 的渠道）
         is_weblogin = (
-            uuid.startswith("phone-") or 
-            uuid.startswith("xiaomi_app-") or 
-            uuid.startswith("huawei-") or 
-            uuid.startswith("nearme_vivo-") or
-            uuid.startswith("honor-") or
-            uuid.startswith("uc-")
+            uuid.removeprefix("idv-").startswith("phone-") or
+            uuid.removeprefix("idv-").startswith("xiaomi_app-") or
+            uuid.removeprefix("idv-").startswith("huawei-") or
+            uuid.removeprefix("idv-").startswith("nearme_vivo-") or
+            uuid.removeprefix("idv-").startswith("honor-") or
+            uuid.removeprefix("idv-").startswith("uc-")
         )
         
         if not is_weblogin:
@@ -535,12 +610,12 @@ class ChannelManager:
         """
         # 检查是否有 weblogin 账号
         has_weblogin = any(
-            ch.uuid.startswith("phone-") or 
-            ch.uuid.startswith("xiaomi_app-") or 
-            ch.uuid.startswith("huawei-") or 
-            ch.uuid.startswith("nearme_vivo-") or
-            ch.uuid.startswith("honor-") or
-            ch.uuid.startswith("uc-")
+            ch.uuid.removeprefix("idv-").startswith("phone-") or
+            ch.uuid.removeprefix("idv-").startswith("xiaomi_app-") or
+            ch.uuid.removeprefix("idv-").startswith("huawei-") or
+            ch.uuid.removeprefix("idv-").startswith("nearme_vivo-") or
+            ch.uuid.removeprefix("idv-").startswith("honor-") or
+            ch.uuid.removeprefix("idv-").startswith("uc-")
             for ch in self.channels
         )
         
@@ -563,12 +638,12 @@ class ChannelManager:
                     
                     # 只清理 weblogin 类型的文件夹
                     is_weblogin_folder = (
-                        folder_name.startswith("phone-") or 
-                        folder_name.startswith("xiaomi_app-") or 
-                        folder_name.startswith("huawei-") or 
-                        folder_name.startswith("nearme_vivo-") or
-                        folder_name.startswith("honor-") or
-                        folder_name.startswith("uc-")
+                        folder_name.removeprefix("idv-").startswith("phone-") or
+                        folder_name.removeprefix("idv-").startswith("xiaomi_app-") or
+                        folder_name.removeprefix("idv-").startswith("huawei-") or
+                        folder_name.removeprefix("idv-").startswith("nearme_vivo-") or
+                        folder_name.removeprefix("idv-").startswith("honor-") or
+                        folder_name.removeprefix("idv-").startswith("uc-")
                     )
                     
                     if is_weblogin_folder and folder_name not in valid_uuids:
@@ -591,12 +666,12 @@ class ChannelManager:
                     
                     # 只清理 weblogin 类型的文件夹
                     is_weblogin_folder = (
-                        folder_name.startswith("phone-") or 
-                        folder_name.startswith("xiaomi_app-") or 
-                        folder_name.startswith("huawei-") or 
-                        folder_name.startswith("nearme_vivo-") or
-                        folder_name.startswith("honor-") or
-                        folder_name.startswith("uc-")
+                        folder_name.removeprefix("idv-").startswith("phone-") or
+                        folder_name.removeprefix("idv-").startswith("xiaomi_app-") or
+                        folder_name.removeprefix("idv-").startswith("huawei-") or
+                        folder_name.removeprefix("idv-").startswith("nearme_vivo-") or
+                        folder_name.removeprefix("idv-").startswith("honor-") or
+                        folder_name.removeprefix("idv-").startswith("uc-")
                     )
                     
                     if is_weblogin_folder and folder_name not in valid_uuids:
@@ -616,6 +691,43 @@ class ChannelManager:
                 return channel
         return None
 
+    def remember_native_account(self, record: channel, channel_data: dict, game_id: str):
+        if record.record_source != "manual":
+            return
+        import base64
+        from urllib.parse import unquote
+        from channelHandler.channelUtils import getShortGameId
+
+        extra = json.loads(channel_data["extra_unisdk_data"])
+        sauth = json.loads(base64.b64decode(unquote(extra["SAUTH_JSON"])))
+        if not cmp_game_id(sauth["gameid"], game_id):
+            raise ValueError("渠道登录结果与目标游戏不一致")
+        if sauth["login_channel"] != record.channel_name or not sauth["sdkuid"]:
+            raise ValueError("渠道登录结果缺少匹配的账号身份")
+        accounts = genv.get("native_channel_accounts", {})
+        by_channel = accounts.setdefault(getShortGameId(game_id), {})
+        by_user = by_channel.setdefault(sauth["login_channel"], {})
+        # 同一身份再次成功登录时，明确采用最后一次使用的记录。
+        by_user[str(sauth["sdkuid"])] = record.uuid
+        genv.set("native_channel_accounts", accounts, True)
+
+    def native_account(self, login_channel: str, user_id: str, game_id: str):
+        from channelHandler.channelUtils import getShortGameId
+
+        uuid = genv.get("native_channel_accounts", {}).get(
+            getShortGameId(game_id), {}
+        ).get(login_channel, {}).get(str(user_id))
+        if not uuid:
+            return None
+        record = self.query_channel(uuid)
+        if record is None:
+            raise ValueError("原生登录关联的手动账号已删除，请重新选择账号")
+        if record.record_source != "manual" or record.channel_name != login_channel:
+            raise ValueError("原生登录关联的渠道账号不一致")
+        if not record.crossGames and not cmp_game_id(record.game_id, game_id):
+            raise ValueError("原生登录关联的游戏不一致")
+        return record
+
     def simulate_confirm(self, channel: channel, scanner_uuid: str, game_id: str, on_complete=None):
         def _do_confirm(channel_data):
             if not channel_data:
@@ -634,6 +746,7 @@ class ChannelManager:
             )
             self.logger.info(f"模拟确认请求返回: {r.json()}")
             if r.status_code == 200:
+                self.remember_native_account(channel, channel_data, game_id)
                 channel.last_login_time = int(time.time())
                 self.save_records()
                 result = r.json()
@@ -673,14 +786,19 @@ class ChannelManager:
                 }
                 try:
                     if scanner_uuid=="Kinich":
-                        # 支持异步模式
-                        if on_complete is not None and hasattr(channel, 'get_uniSdk_data'):
-                            import inspect
-                            sig = inspect.signature(channel.get_uniSdk_data)
-                            if 'on_complete' in sig.parameters:
-                                channel.get_uniSdk_data(on_complete=on_complete)
-                                return None
-                        return channel.get_uniSdk_data()
+                        def _ready(channel_data):
+                            if channel_data:
+                                self.remember_native_account(channel, channel_data, channel_data["jf_game_id"])
+                                channel.last_login_time = int(time.time())
+                                self.save_records()
+                            if on_complete:
+                                on_complete(channel_data)
+                            return channel_data
+
+                        if on_complete is not None and channel.record_source == "manual":
+                            channel.get_uniSdk_data(on_complete=_ready)
+                            return None
+                        return _ready(channel.get_uniSdk_data())
                     r = requests.get(
                         "https://service.mkey.163.com/mpay/api/qrcode/scan",
                         params=data,

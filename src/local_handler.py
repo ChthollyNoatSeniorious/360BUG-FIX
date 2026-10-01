@@ -155,7 +155,6 @@ class LocalRequestHandler:
             "/_idv-login/set-proxy-mode": self._set_proxy_mode,
             "/_idv-login/create-game-shortcut": self._create_game_shortcut,
             "/_idv-login/scan-record-setting": self._scan_record_setting,
-            "/_idv-login/native-save-setting": self._native_save_setting,
             "/_idv-login/native/capabilities": self._native_capabilities,
             "/_idv-login/native/window-drag": self._native_window_drag,
             "/_idv-login/native/window-toggle-maximize": self._native_window_toggle_maximize,
@@ -211,6 +210,7 @@ class LocalRequestHandler:
             "success": True,
             "status": "ok",
             "installation_model_version": 1,
+            "version": genv.get("VERSION", ""),
         })
 
     @staticmethod
@@ -580,40 +580,10 @@ class LocalRequestHandler:
 
             genv.set("SCAN_RECORD_ENABLED", bool(enabled), True)
 
-            if not enabled:
-                genv.set("NATIVE_SAVE_ENABLED", False, True)
-
             return self._json_response(200, {
                 "success": True,
                 "enabled": bool(enabled),
-                "native_save_enabled": genv.get("NATIVE_SAVE_ENABLED", False),
             })
-        except Exception as e:
-            return self._json_response(200, {"success": False, "error": str(e)})
-
-    def _native_save_setting(self, args, body, method):
-        """开关 2：是否启用原生渠道服保存（is_remember 注入）。"""
-        try:
-            if method == "GET":
-                enabled = genv.get("NATIVE_SAVE_ENABLED", False)
-                scan_record = genv.get("SCAN_RECORD_ENABLED", True)
-                return self._json_response(200, {
-                    "success": True,
-                    "enabled": enabled,
-                    "scan_record_enabled": scan_record,
-                })
-
-            enabled = (body or {}).get("enabled", False)
-            scan_record = genv.get("SCAN_RECORD_ENABLED", True)
-
-            if enabled and not scan_record:
-                return self._json_response(200, {
-                    "success": False,
-                    "error": "需要先开启扫码记录功能",
-                })
-
-            genv.set("NATIVE_SAVE_ENABLED", bool(enabled), True)
-            return self._json_response(200, {"success": True, "enabled": bool(enabled)})
         except Exception as e:
             return self._json_response(200, {"success": False, "error": str(e)})
 
@@ -2008,15 +1978,8 @@ class LocalRequestHandler:
     # -- Utility routes ──
 
     def _serve_index(self, args, body, method):
+        # 版本号为空视为开发环境，同样读取云端 webui，不再回退本地 assets/index.html。
         try:
-            version = genv.get("VERSION", "")
-            if not version:
-                local_path = os.path.normpath(
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "index.html")
-                )
-                if os.path.exists(local_path):
-                    with open(local_path, "r", encoding="utf-8") as f:
-                        return self._html_response(200, f.read())
             cloud_page = CloudRes().get_login_page()
             if cloud_page:
                 return self._html_response(200, cloud_page)

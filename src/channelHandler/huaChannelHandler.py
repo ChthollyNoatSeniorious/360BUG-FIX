@@ -226,6 +226,18 @@ class huaweiChannel(channelmgr.channel):
 
         return str(self.session.playerLevel)
 
+    def get_session(self, user_id: str, game_id: str):
+        game_cfg, short_gid = self._resolve_game_cfg(game_id)
+        if game_cfg is None:
+            raise ValueError("该游戏尚未配置华为渠道")
+        session = self._ensure_session(game_cfg, short_gid)
+        if session is None:
+            raise ValueError("登录已过期，请在渠道服管理界面重新登录")
+        return self._session_result(
+            user_id, session.playerId, session.gameAuthSign,
+            extra_data=self._get_extra_data(short_gid), timestamp=str(session.ts),
+        )
+
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         """获取 UniSDK 登录数据（cross 渠道：可为任意已配置游戏签发）。
 

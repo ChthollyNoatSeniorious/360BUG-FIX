@@ -176,7 +176,7 @@ class vivoChannel(channelmgr.channel):
         return True
 
 
-    def request_user_login(self, on_complete=None):
+    def request_user_login(self, on_complete=None, user_id: str = ""):
         genv.set("GLOB_LOGIN_UUID", self.uuid)
 
         def _finalize_login():
@@ -199,6 +199,11 @@ class vivoChannel(channelmgr.channel):
             self.cookies = self.vivoLogin.cookies
             self.session = vivoLoginResp(resp)
 
+            if user_id:
+                if not any(account.subOpenId == user_id for account in self.session.subAccounts):
+                    raise ValueError("vivo 未返回本次登录指定的小号")
+                self.chosenAccount = user_id
+                return _finalize_login()
             if len(self.session.subAccounts) == 0:
                 return False
             elif len(self.session.subAccounts) == 1:
@@ -291,6 +296,20 @@ class vivoChannel(channelmgr.channel):
         res["SAUTH_STR"] = base64.b64encode(str_data.encode()).decode()
         res["SAUTH_JSON"] = base64.b64encode(json.dumps(json_data).encode()).decode()
         return json.dumps(res)
+
+    def get_session(self, user_id: str, game_id: str):
+        account = None
+        if self.session is not None:
+            account = next((item for item in self.session.subAccounts if item.subOpenId == user_id), None)
+        if account is not None:
+            self.activeAccount = account
+            if not self._refresh_open_token():
+                raise ValueError("登录已过期，请在渠道服管理界面重新登录")
+        elif not self.request_user_login(user_id=user_id):
+            raise ValueError("登录已过期，请在渠道服管理界面重新登录")
+        return self._session_result(
+            user_id, self.activeAccount.subOpenId, self.activeAccount.openToken,
+        )
 
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         genv.set("GLOB_LOGIN_UUID", self.uuid)

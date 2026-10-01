@@ -201,6 +201,18 @@ class ucChannel(channelmgr.channel):
 
     # ── UniSDK 数据 ──────────────────────────────────────────
 
+    def get_session(self, user_id: str, game_id: str):
+        if not self._has_valid_sid() and self.refreshToken:
+            self._try_refresh()
+        if not self._has_valid_sid():
+            self.request_user_login()
+        data = self._get_session_data()
+        if not data:
+            raise ValueError("登录已过期，请在渠道服管理界面重新登录")
+        return self._session_result(
+            user_id, data.get("accountId") or data.get("ucid"), data.get("sid"),
+        )
+
     def get_uniSdk_data(self, game_id: str = "", on_complete=None):
         genv.set("GLOB_LOGIN_UUID", self.uuid)
         if not game_id:
