@@ -46,6 +46,10 @@ headers = {
     "user-agent": "Mozilla/5.0 (iPod; U; CPU iPhone OS 3_3 like Mac OS X; an-ES) AppleWebKit/534.37.3 (KHTML, like Gecko) Version/4.0.5 Mobile/8B114 Safari/6534.37.3"
 }
 
+class QuarkUploadError(RuntimeError):
+    """Only fixed stage labels and numeric service codes may enter this message."""
+
+
 def log_step(step, detail=""):
     """日志输出每个步骤"""
     print(f"=== {step} === {detail}")
@@ -148,9 +152,15 @@ def make_request(url, method="POST", data=None, extra_headers=None, max_retries=
                 response = requests.post(url, headers=req_headers, cookies=cookies, params=params, json=data, timeout=20)
 
             if response.status_code != 200:
-                raise Exception(f"请求失败: {response.status_code}, {response.text}")
+                raise QuarkUploadError(f"API HTTP {response.status_code}")
 
             result = response.json()
+            if not isinstance(result, dict):
+                raise QuarkUploadError("API returned an invalid response shape")
+            if result.get("code", 0) not in (0, "0"):
+                code = result.get("code")
+                safe_code = str(code) if str(code).lstrip("-").isdigit() else "unknown"
+                raise QuarkUploadError(f"API code {safe_code}")
             return result
         except (requests.RequestException, ValueError, Exception) as e:
             last_error = e
@@ -158,7 +168,8 @@ def make_request(url, method="POST", data=None, extra_headers=None, max_retries=
                 break
             time.sleep(retry_backoff * attempt)
 
-    raise Exception(f"请求失败(重试{max_retries}次): {last_error}")
+    detail = str(last_error) if isinstance(last_error, QuarkUploadError) else type(last_error).__name__
+    raise QuarkUploadError(f"API failed after {max_retries} attempts: {detail}")
 
 def up_pre(file_path, parent_id):
     """预上传，获取上传任务信息"""
@@ -252,7 +263,7 @@ def up_part(pre_data, mime_type, part_number, part_data, max_retries=3, retry_ba
         try:
             response = requests.put(oss_url, data=part_data, headers=oss_headers, params=params, timeout=60)
             if response.status_code != 200:
-                raise Exception(f"分片上传失败: {response.status_code}, {response.text}")
+                raise QuarkUploadError(f"OSS part HTTP {response.status_code}")
             etag = response.headers.get('ETag', '')
             return etag
         except (requests.RequestException, Exception) as e:
@@ -261,7 +272,8 @@ def up_part(pre_data, mime_type, part_number, part_data, max_retries=3, retry_ba
                 break
             time.sleep(retry_backoff * attempt)
 
-    raise Exception(f"分片上传失败(重试{max_retries}次): {last_error}")
+    detail = str(last_error) if isinstance(last_error, QuarkUploadError) else type(last_error).__name__
+    raise QuarkUploadError(f"OSS part failed after {max_retries} attempts: {detail}")
 
 def up_commit_auth(pre_data, content_md5, callback_base64):
     """获取提交授权"""
@@ -331,10 +343,10 @@ def up_commit(pre_data, etags):
     params = {"uploadId": pre_data['upload_id']}
     
     log_step("提交分片信息", f"共 {len(etags)} 个分片")
-    response = requests.post(oss_url, data=xml_body, headers=oss_headers, params=params)
+    response = requests.post(oss_url, data=xml_body, headers=oss_headers, params=params, timeout=60)
     
     if response.status_code != 200:
-        raise Exception(f"提交失败: {response.status_code}, {response.text}")
+        raise QuarkUploadError(f"OSS commit HTTP {response.status_code}")
     
     return True
 
@@ -388,7 +400,10 @@ def upload_file(file_path, parent_id):
     
     # 2. 预上传
     pre_result = up_pre(file_path, parent_id)
-    pre_data = pre_result['data']
+    pre_data = pre_result.get('data')
+    required = ('task_id', 'obj_key', 'upload_url', 'upload_id', 'bucket', 'auth_info')
+    if not isinstance(pre_data, dict) or any(key not in pre_data for key in required):
+        raise QuarkUploadError("Pre-upload response is missing required upload fields")
     
     task_id = pre_data['task_id']
     obj_key = pre_data['obj_key']
@@ -473,8 +488,9 @@ def main(upload_file_path):
         #else:
         #    raise Exception("未获取到最终分享链接")
             
-    except Exception:
-        log_step("上传失败，请检查凭证、网络及目标目录")
+    except Exception as error:
+        detail = str(error) if isinstance(error, QuarkUploadError) else type(error).__name__
+        log_step("上传失败", detail)
         sys.exit(1)
 
 if __name__ == "__main__":
