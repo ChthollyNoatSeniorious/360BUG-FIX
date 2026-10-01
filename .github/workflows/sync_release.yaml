@@ -13,11 +13,20 @@ on:
         description: '要同步的精确版本标签（包括 beta）'
         required: true
         type: string
+      skip_quark_upload:
+        description: '仅在确认此版本已上传夸克后启用，恢复后续发布步骤'
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       release_tag:
         required: true
         type: string
+      skip_quark_upload:
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: sync-release-${{ inputs.release_tag || github.event.release.tag_name }}
@@ -71,6 +80,7 @@ jobs:
             core.setOutput('tag', data.tag_name);
 
       - name: Download exact release assets
+        if: ${{ !inputs.skip_quark_upload }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -80,6 +90,7 @@ jobs:
           gh release download "$RELEASE_TAG" --dir tmps --pattern '*.exe' --pattern '*-mac' --pattern '*.zip'
 
       - name: Create compressed archives
+        if: ${{ !inputs.skip_quark_upload }}
         run: |
           cd tmps
           
@@ -110,6 +121,7 @@ jobs:
           ls -la *.zip
 
       - name: Upload to Quark Drive
+        if: ${{ !inputs.skip_quark_upload }}
         env:
           QUARK_COOKIES_B64: ${{ secrets.QUARK_COOKIES_B64 }}
           QUARK_PDIR_FID: ${{ secrets.QUARK_PDIR_FID }}
@@ -126,6 +138,14 @@ jobs:
             fi
           done
 
+  publish-gitee:
+    needs: sync_release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Release to Gitee
         id: release
         env:
@@ -133,15 +153,15 @@ jobs:
           UPLOAD_URL: ${{ secrets.SECRET_UPLOAD_URL}}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ steps.selected_release.outputs.tag }}
+          RELEASE_TAG: ${{ needs.sync_release.outputs.release_tag }}
           GITEE_TOKEN: ${{secrets.GITEE_TOKEN }}
           GITEE_ROPE: ${{ secrets.GITEE_ROPE }}
         run: |
-          pip install -q requests_toolbelt==1.0.0
+          pip install -q requests==2.33.1 requests_toolbelt==1.0.0
           python tools/release_upload.py tmp
 
   update-resources:
-    needs: sync_release
+    needs: [sync_release, publish-gitee]
     uses: ./.github/workflows/update_json.yaml
     with:
       release_tag: ${{ needs.sync_release.outputs.release_tag }}

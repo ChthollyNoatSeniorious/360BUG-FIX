@@ -102,9 +102,10 @@ def releaseToGitee(releaseData, fileList=None):
     # Public tag lookup does not put credentials in a URL or error message.
     from urllib.parse import quote
     existing = requests.get(url + "/tags/" + quote(releaseData["tag_name"], safe=''), timeout=30)
-    if existing.status_code == 200:
-        response = requests.patch(url + "/" + str(existing.json()["id"]), data=data, timeout=30)
-    elif existing.status_code == 404:
+    existing_data = existing.json() if existing.status_code == 200 else None
+    if existing.status_code == 200 and isinstance(existing_data, dict) and existing_data.get("id"):
+        response = requests.patch(url + "/" + str(existing_data["id"]), data=data, timeout=30)
+    elif existing.status_code == 404 or (existing.status_code == 200 and existing_data is None):
         response = requests.post(url, data=data, timeout=30)
     else:
         existing.raise_for_status()
@@ -140,7 +141,9 @@ if __name__=='__main__':
 ### 温馨提示2：下面的不是下载链接，下载链接在上面
 ''')
         releaseToGitee(releaseData,fileList)
-    except Exception:
-        print("Gitee release synchronization failed", file=sys.stderr)
+    except Exception as error:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        detail = f"HTTP {status}" if isinstance(status, int) else type(error).__name__
+        print(f"Gitee release synchronization failed: {detail}", file=sys.stderr)
         sys.exit(1)
 
